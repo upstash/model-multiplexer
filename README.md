@@ -1,6 +1,6 @@
 # @upstash/model-multiplexer
 
-A TypeScript library that acts as a multiplexer for Large Language Model (LLM) APIs, built on top of the OpenAI JavaScript SDK. It allows you to define multiple models, each with a weight, and intelligently routes requests based on those weights and rate limits.
+A TypeScript library that acts as a multiplexer for Large Language Model (LLM) APIs, built on top of the OpenAI JavaScript SDK. It allows you to define multiple models, each with a weight, and smartly routes requests based on those weights and rate limits.
 
 ## Features
 
@@ -120,40 +120,6 @@ The fallback models feature provides several benefits:
 1. **Guaranteed availability**: Ensures requests succeed even when premium models are rate-limited
 2. **Quality tiering**: Use your best models first, fall back to more affordable/available options when needed
 3. **Cost optimization**: Configure high-quality/high-cost models as primary and more affordable models as backup
-
-### Choosing Different Models
-
-When using the multiplexer, you can specify different models in your requests just like with the regular OpenAI SDK:
-
-```typescript
-// Using GPT-4
-const completionGpt4 = await multiplexer.chat.completions.create({
-  model: "gpt-4",
-  messages: [{ role: "user", content: "Explain quantum computing" }],
-});
-
-// Using GPT-3.5 Turbo
-const completionGpt35 = await multiplexer.chat.completions.create({
-  model: "gpt-3.5-turbo",
-  messages: [{ role: "user", content: "How does a car engine work?" }],
-});
-
-// Using specific provider models
-const completionWithProviderSpecificModel =
-  await multiplexer.chat.completions.create({
-    model: "claude-3-opus-20240229", // For Anthropic
-    messages: [{ role: "user", content: "Summarize the history of AI" }],
-  });
-```
-
-Note that the `model` parameter in your request might be handled differently depending on the provider:
-
-1. **OpenAI**: Uses the model name directly (e.g., "gpt-4", "gpt-3.5-turbo")
-2. **Anthropic**: Requires specific Claude model names (e.g., "claude-3-opus-20240229", "claude-3-sonnet-20240229")
-3. **Azure OpenAI**: Uses deployment names rather than model names
-4. **Other providers**: May interpret the model parameter differently or ignore it
-
-The multiplexer will pass your specified model to whichever provider is selected based on weights and availability.
 
 ### Model-Specific Clients
 
