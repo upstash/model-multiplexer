@@ -9,12 +9,7 @@ import {
   ChatCompletionCreateParamsStreaming,
 } from "openai/resources/chat/completions";
 import { Stream } from "openai/streaming";
-import {
-  ModelConfig,
-  ModelMultiplexerConfig,
-  ManagedClient,
-  ModelStats,
-} from "./types"; // Import types
+import { ModelMultiplexerConfig, ManagedClient, ModelStats } from "./types"; // Import types
 
 // --- Proxy Class for Chat ---
 class ChatProxy {
@@ -30,19 +25,85 @@ class ChatProxy {
       // Use arrow function for correct 'this' binding
       if (params.stream) {
         // Type assertion needed for specific parameters expected by the SDK methods
-        return this.multiplexer.executeRequestForStream((client: OpenAI) =>
-          client.chat.completions.create(
-            params as ChatCompletionCreateParamsStreaming,
+        return this.multiplexer.executeRequestForStream((client: OpenAI) => {
+          // Try to extract the model from the client's defaultQuery
+          let clientModel: string | undefined;
+
+          // Handle both function-style and object-style defaultQuery
+          if (typeof (client as any).defaultQuery === "function") {
+            // For function-style, we need to call it to get the result
+            try {
+              const defaultQueryResult = (client as any).defaultQuery();
+              clientModel = defaultQueryResult?.model;
+            } catch (e) {
+              // If function call fails, continue without the defaultQuery model
+            }
+          } else if (typeof (client as any).defaultQuery === "object") {
+            // For object-style, directly access the model property
+            clientModel = (client as any).defaultQuery?.model;
+          }
+
+          // Use the client's defaultQuery model if available, otherwise keep original
+          const modelToUse = clientModel || params.model;
+          console.log(
+            `[INFO] Using model: ${modelToUse} from ${
+              String((client as any).baseURL).includes("anthropic.com")
+                ? "Anthropic"
+                : "OpenAI"
+            } client`
+          );
+
+          // Create a new params object with the appropriate model
+          const newParams = {
+            ...params,
+            model: modelToUse,
+          };
+
+          return client.chat.completions.create(
+            newParams as ChatCompletionCreateParamsStreaming,
             options
-          )
-        );
+          );
+        });
       } else {
-        return this.multiplexer.executeRequest((client: OpenAI) =>
-          client.chat.completions.create(
-            params as ChatCompletionCreateParamsNonStreaming,
+        return this.multiplexer.executeRequest((client: OpenAI) => {
+          // Try to extract the model from the client's defaultQuery
+          let clientModel: string | undefined;
+
+          // Handle both function-style and object-style defaultQuery
+          if (typeof (client as any).defaultQuery === "function") {
+            // For function-style, we need to call it to get the result
+            try {
+              const defaultQueryResult = (client as any).defaultQuery();
+              clientModel = defaultQueryResult?.model;
+            } catch (e) {
+              // If function call fails, continue without the defaultQuery model
+            }
+          } else if (typeof (client as any).defaultQuery === "object") {
+            // For object-style, directly access the model property
+            clientModel = (client as any).defaultQuery?.model;
+          }
+
+          // Use the client's defaultQuery model if available, otherwise keep original
+          const modelToUse = clientModel || params.model;
+          console.log(
+            `[INFO] Using model: ${modelToUse} from ${
+              String((client as any).baseURL).includes("anthropic.com")
+                ? "Anthropic"
+                : "OpenAI"
+            } client`
+          );
+
+          // Create a new params object with the appropriate model
+          const newParams = {
+            ...params,
+            model: modelToUse,
+          };
+
+          return client.chat.completions.create(
+            newParams as ChatCompletionCreateParamsNonStreaming,
             options
-          )
-        );
+          );
+        });
       }
     }) as {
       // Type assertion to satisfy TS about the overloads
