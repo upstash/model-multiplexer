@@ -1,6 +1,6 @@
 {
   "name": "@upstash/model-multiplexer",
-  "version": "0.1.3",
+  "version": "0.2.1",
   "description": "A multiplexer for Large Language Model APIs built on the OpenAI SDK",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -21,7 +21,7 @@
   ],
   "author": "Upstash",
   "license": "MIT",
-  "dependencies": {
+  "peerDependencies": {
     "openai": "^4.0.0"
   },
   "devDependencies": {
@@ -34,5 +34,9 @@
   },
   "engines": {
     "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/upstash/model-multiplexer.git"
   }
 }

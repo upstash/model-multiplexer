@@ -1,4 +1,5 @@
 # Source files (we only want the compiled output in dist/)
+src
 src/__tests__/
 examples/
 
