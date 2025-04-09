@@ -1,0 +1,33 @@
+# Source files (we only want the compiled output in dist/)
+src/__tests__/
+examples/
+
+# Development files
+.env
+.gitignore
+jest.config.js
+tsconfig.json
+prompts.txt
+
+# IDE directories
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Runtime data
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# Cache
+.npm/
+.eslintcache
+
+# TypeScript cache
+*.tsbuildinfo 
