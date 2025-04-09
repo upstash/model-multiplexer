@@ -1,6 +1,6 @@
 {
   "name": "@upstash/model-multiplexer",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "A multiplexer for Large Language Model APIs built on the OpenAI SDK",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
