@@ -1,758 +1,314 @@
 import OpenAI from "openai";
-import { APIError } from "openai/error";
-import { RequestOptions } from "openai/core";
-import {
-  ChatCompletion,
-  ChatCompletionChunk,
-  ChatCompletionCreateParams,
-  ChatCompletionCreateParamsNonStreaming,
-  ChatCompletionCreateParamsStreaming,
-} from "openai/resources/chat/completions";
-import { Stream } from "openai/streaming";
-import { ModelMultiplexerConfig, ManagedClient, ModelStats } from "./types"; // Import types
+import type { ChatCompletionCreateParams } from "openai/resources/chat/completions";
 
-// --- Proxy Class for Chat ---
-class ChatProxy {
-  // Keep constructor expecting the main multiplexer class
-  constructor(private multiplexer: ModelMultiplexer) {}
-
-  public completions = {
-    // Define create method with overloads and implementation using an arrow function
-    create: ((
-      params: ChatCompletionCreateParams,
-      options?: RequestOptions
-    ): Promise<ChatCompletion | Stream<ChatCompletionChunk>> => {
-      // Use arrow function for correct 'this' binding
-      if (params.stream) {
-        // Type assertion needed for specific parameters expected by the SDK methods
-        return this.multiplexer.executeRequestForStream((client: OpenAI) => {
-          // Try to extract the model from the client's defaultQuery
-          let clientModel: string | undefined;
-
-          // Handle both function-style and object-style defaultQuery
-          if (typeof (client as any).defaultQuery === "function") {
-            // For function-style, we need to call it to get the result
-            try {
-              const defaultQueryResult = (client as any).defaultQuery();
-              clientModel = defaultQueryResult?.model;
-            } catch (e) {
-              // If function call fails, continue without the defaultQuery model
-            }
-          } else if (typeof (client as any).defaultQuery === "object") {
-            // For object-style, directly access the model property
-            clientModel = (client as any).defaultQuery?.model;
-          }
-
-          // Use the client's defaultQuery model if available, otherwise keep original
-          const modelToUse = clientModel || params.model;
-          console.log(
-            `[INFO] Using model: ${modelToUse} from ${
-              String((client as any).baseURL).includes("anthropic.com")
-                ? "Anthropic"
-                : "OpenAI"
-            } client`
-          );
-
-          // Create a new params object with the appropriate model
-          const newParams = {
-            ...params,
-            model: modelToUse,
-          };
-
-          return client.chat.completions.create(
-            newParams as ChatCompletionCreateParamsStreaming,
-            options
-          );
-        });
-      } else {
-        return this.multiplexer.executeRequest((client: OpenAI) => {
-          // Try to extract the model from the client's defaultQuery
-          let clientModel: string | undefined;
-
-          // Handle both function-style and object-style defaultQuery
-          if (typeof (client as any).defaultQuery === "function") {
-            // For function-style, we need to call it to get the result
-            try {
-              const defaultQueryResult = (client as any).defaultQuery();
-              clientModel = defaultQueryResult?.model;
-            } catch (e) {
-              // If function call fails, continue without the defaultQuery model
-            }
-          } else if (typeof (client as any).defaultQuery === "object") {
-            // For object-style, directly access the model property
-            clientModel = (client as any).defaultQuery?.model;
-          }
-
-          // Use the client's defaultQuery model if available, otherwise keep original
-          const modelToUse = clientModel || params.model;
-          console.log(
-            `[INFO] Using model: ${modelToUse} from ${
-              String((client as any).baseURL).includes("anthropic.com")
-                ? "Anthropic"
-                : "OpenAI"
-            } client`
-          );
-
-          // Create a new params object with the appropriate model
-          const newParams = {
-            ...params,
-            model: modelToUse,
-          };
-
-          return client.chat.completions.create(
-            newParams as ChatCompletionCreateParamsNonStreaming,
-            options
-          );
-        });
-      }
-    }) as {
-      // Type assertion to satisfy TS about the overloads
-      (
-        params: ChatCompletionCreateParamsNonStreaming,
-        options?: RequestOptions
-      ): Promise<ChatCompletion>;
-      (
-        params: ChatCompletionCreateParamsStreaming,
-        options?: RequestOptions
-      ): Promise<Stream<ChatCompletionChunk>>;
-    },
-    // Add other methods under 'completions' if required
-  };
-  // Add other methods under 'chat' if required (e.g., 'messages')
+interface WeightedModel {
+  model: OpenAI;
+  weight: number;
+  modelName: string;
+  // Timestamp until which the model is disabled due to rate limiting
+  disabledUntil: number | null;
+  // Statistics
+  successCount: number;
+  rateLimitCount: number;
+  failFastCount: number;
 }
 
-// The main multiplexer class
-export class ModelMultiplexer {
-  private clients: ManagedClient[];
-  private fallbackClients: ManagedClient[];
-  private totalWeight: number;
-  private totalFallbackWeight: number;
+export class Multiplexer {
+  private weightedModels: WeightedModel[] = [];
+  private fallbackModels: WeightedModel[] = [];
+  private modelTimeouts: Map<string, NodeJS.Timeout> = new Map(); // Store timeout IDs
 
-  // Proxy properties for OpenAI sub-APIs
-  public readonly chat: ChatProxy; // Use the defined class type
+  constructor() {}
 
-  constructor(config: ModelMultiplexerConfig) {
-    const { models, fallbackModels = [] } = config;
-
-    if (!models || models.length === 0) {
-      throw new Error("At least one model configuration must be provided.");
-    }
-
-    // Store models directly as they are already instantiated
-    this.clients = models.map((modelConfig) => ({
-      config: modelConfig,
-      isRateLimited: modelConfig.isRateLimited || false,
-      rateLimitedUntil: modelConfig.rateLimitedUntil,
-      isFallback: false,
-      // Add stats tracking
-      stats: {
-        client: this.getClientIdentifier(modelConfig.model),
-        model: this.getModelIdentifier(modelConfig.model),
-        callCount: 0,
-        failedWithRateLimit: 0,
-        failedWithAnotherException: 0,
-      },
-    }));
-
-    // Store fallback models if provided
-    this.fallbackClients = fallbackModels.map((modelConfig) => ({
-      config: modelConfig,
-      isRateLimited: modelConfig.isRateLimited || false,
-      rateLimitedUntil: modelConfig.rateLimitedUntil,
-      isFallback: true,
-      // Add stats tracking
-      stats: {
-        client: this.getClientIdentifier(modelConfig.model),
-        model: this.getModelIdentifier(modelConfig.model),
-        callCount: 0,
-        failedWithRateLimit: 0,
-        failedWithAnotherException: 0,
-      },
-    }));
-
-    // Initial calculation. Will be updated dynamically.
-    this.totalWeight = this.getActiveClients(this.clients).reduce(
-      (sum, mc) => sum + mc.config.weight,
-      0
-    );
-    this.totalFallbackWeight = this.getActiveClients(
-      this.fallbackClients
-    ).reduce((sum, mc) => sum + mc.config.weight, 0);
-
-    if (this.totalWeight <= 0 && this.clients.length > 0) {
-      // Warn if all models start inactive, but proceed. It might be intentional.
-      console.warn(
-        "All initial models have zero or negative weight, or are inactive."
-      );
-    } else if (this.clients.length === 0) {
-      // This case is already handled by the initial check, but kept for clarity.
-      throw new Error("No models provided.");
-    }
-
-    if (this.fallbackClients.length > 0 && this.totalFallbackWeight <= 0) {
-      console.warn(
-        "All fallback models have zero or negative weight, or are inactive."
-      );
-    }
-
-    // Initialize proxies
-    this.chat = new ChatProxy(this); // Instantiate the proxy class
-  }
-
-  // Helper method to extract client identifier
-  private getClientIdentifier(client: OpenAI): string {
-    // API key is the most reliable way to identify clients in tests
-    if ((client as any).apiKey) {
-      return (client as any).apiKey.substring(0, 8);
-    }
-
-    // Fall back to other identification methods
-    return (client as any).name || "unknown";
-  }
-
-  // Helper method to extract model identifier
-  private getModelIdentifier(client: OpenAI): string {
-    // Try to extract model info from default or custom configuration
-    // This is a basic implementation - improve based on actual OpenAI client structure
-    return (
-      (client as any).defaultQuery?.model ||
-      (client as any).defaultHeaders?.["OpenAI-Model"] ||
-      "unknown-model"
-    );
-  }
-
-  // NEW: Public method to get stats for all models
-  public getStats(): { models: ModelStats[]; fallbackModels: ModelStats[] } {
-    return {
-      models: this.clients.map((client) => ({ ...client.stats })),
-      fallbackModels: this.fallbackClients.map((client) => ({
-        ...client.stats,
-      })),
-    };
-  }
-
-  private getActiveClients(clientList: ManagedClient[]): ManagedClient[] {
+  // Selects an active weighted model entry based on weight
+  private _selectWeightedModel(): WeightedModel {
     const now = Date.now();
-    let weightRecalculated = false;
-    const activeClients = clientList.filter((c) => {
-      if (c.isRateLimited) {
-        if (c.rateLimitedUntil && now >= c.rateLimitedUntil) {
-          console.log(`A model's rate limit expired. Re-activating.`);
-          c.isRateLimited = false;
-          c.rateLimitedUntil = undefined;
-          weightRecalculated = true;
-          return c.config.weight > 0;
-        }
-        return false;
-      }
-      return c.config.weight > 0;
-    });
+    // Filter for active models
+    const activeModels = this.weightedModels.filter(
+      (wm) => wm.disabledUntil === null || wm.disabledUntil < now
+    );
 
-    // Recalculate total weight based on reactivations IN THIS LIST
-    if (weightRecalculated) {
-      // Instead of determining list type based on the first client,
-      // use reference comparison to determine if we're dealing with fallback list
-      const isFallbackList = clientList === this.fallbackClients;
-
-      // Calculate weight from the filtered activeClients list
-      const newTotalWeight = activeClients.reduce(
-        (sum, mc) => sum + mc.config.weight,
-        0
+    if (activeModels.length === 0) {
+      // Check fallback models if all regular models are disabled
+      const activeFallbacks = this.fallbackModels.filter(
+        (wm) => wm.disabledUntil === null || wm.disabledUntil < now
       );
 
-      if (isFallbackList) {
-        this.totalFallbackWeight = newTotalWeight;
-        console.log(
-          `Recalculated Fallback Weight: ${this.totalFallbackWeight}`
-        ); // Debug log
-      } else {
-        this.totalWeight = newTotalWeight;
-        console.log(`Recalculated Primary Weight: ${this.totalWeight}`); // Debug log
-      }
-    }
-    return activeClients;
-  }
+      if (activeFallbacks.length > 0) {
+        // Use the same weighted selection for fallbacks
+        const totalFallbackWeight = activeFallbacks.reduce(
+          (sum, wm) => sum + wm.weight,
+          0
+        );
 
-  private calculateCurrentTotalWeight(activeClients: ManagedClient[]): number {
-    // Calculates weight based on the provided list of *currently* active clients
-    return activeClients.reduce(
-      (sum, managedClient) => sum + managedClient.config.weight,
+        let randomWeight = Math.random() * totalFallbackWeight;
+
+        for (const fallbackModel of activeFallbacks) {
+          randomWeight -= fallbackModel.weight;
+          if (randomWeight <= 0) {
+            return fallbackModel;
+          }
+        }
+
+        return activeFallbacks[activeFallbacks.length - 1];
+      }
+
+      // Check if there are models but they are all temporarily disabled
+      if (this.weightedModels.length > 0 || this.fallbackModels.length > 0) {
+        throw new Error("All models are temporarily rate limited.");
+      }
+      throw new Error("No models available in the multiplexer.");
+    }
+
+    // Calculate total weight of active models
+    const currentTotalWeight = activeModels.reduce(
+      (sum, wm) => sum + wm.weight,
       0
     );
-  }
-
-  private selectClient(useFallback: boolean = false): ManagedClient | null {
-    const clientList = useFallback ? this.fallbackClients : this.clients;
-    const activeClients = this.getActiveClients(clientList);
-    const currentTotalWeight = this.calculateCurrentTotalWeight(activeClients);
-
-    if (activeClients.length === 0 || currentTotalWeight <= 0) {
-      if (!useFallback) {
-        return null;
-      } else {
-        console.warn(
-          "No active fallback clients available for selection (weight > 0)."
-        );
-        return null;
-      }
-    }
 
     let randomWeight = Math.random() * currentTotalWeight;
-    for (const client of activeClients) {
-      if (client.config.weight > 0) {
-        if (randomWeight < client.config.weight) {
-          return client;
-        }
-        randomWeight -= client.config.weight;
+
+    for (const weightedModel of activeModels) {
+      randomWeight -= weightedModel.weight;
+      if (randomWeight <= 0) {
+        return weightedModel;
       }
     }
 
-    // Fallback: If the loop finishes without selection (e.g., float issues), return the first valid client.
-    const validAvailableClients = activeClients.filter(
-      (c) => c.config.weight > 0
-    );
-    if (validAvailableClients.length > 0) {
-      // Return the FIRST valid client instead of the last
-      console.warn(
-        "Selection loop finished without selecting based on random weight, returning first valid client."
-      );
-      return validAvailableClients[0];
-    }
-
-    // Should not be reached if currentTotalWeight > 0
-    console.error("selectClient reached unexpected end state."); // Added error log
-    return null;
+    // Fallback (should ideally not be reached with correct logic)
+    return activeModels[activeModels.length - 1];
   }
 
-  private handleRateLimit(
-    rateLimitedClient: ManagedClient,
-    retryAfterSeconds: number = 60
-  ) {
-    // Ensure retryAfterSeconds is a sensible minimum (e.g., 1 second)
-    const effectiveRetrySeconds = Math.max(1, retryAfterSeconds);
-
-    console.warn(
-      `A model hit rate limit. Deactivating temporarily for ${effectiveRetrySeconds}s.`
+  // Disables a model temporarily
+  private _disableModelTemporarily(
+    modelName: string,
+    durationMs: number
+  ): void {
+    // Check in primary models first
+    let modelIndex = this.weightedModels.findIndex(
+      (wm) => wm.modelName === modelName
     );
-    rateLimitedClient.isRateLimited = true;
-    rateLimitedClient.rateLimitedUntil =
-      Date.now() + effectiveRetrySeconds * 1000;
+    let modelArray = this.weightedModels;
 
-    // Update rate limit stats
-    rateLimitedClient.stats.failedWithRateLimit++;
-
-    // Recalculate total weight of *remaining* active clients immediately
-    if (rateLimitedClient.isFallback) {
-      this.totalFallbackWeight = this.getActiveClients(
-        this.fallbackClients
-      ).reduce((sum, mc) => sum + mc.config.weight, 0);
-    } else {
-      this.totalWeight = this.getActiveClients(this.clients).reduce(
-        (sum, mc) => sum + mc.config.weight,
-        0
+    // If not found in primary models, check in fallback models
+    if (modelIndex === -1) {
+      modelIndex = this.fallbackModels.findIndex(
+        (wm) => wm.modelName === modelName
       );
+      modelArray = this.fallbackModels;
     }
+
+    // If model not found in either array, return
+    if (modelIndex === -1) return;
+
+    const model = modelArray[modelIndex];
+    model.disabledUntil = Date.now() + durationMs;
+
+    // Clear existing timeout for this model if any
+    const existingTimeout = this.modelTimeouts.get(modelName);
+    if (existingTimeout) {
+      clearTimeout(existingTimeout);
+    }
+
+    // Set a new timeout to re-enable the model
+    const timeoutId = setTimeout(() => {
+      model.disabledUntil = null;
+      this.modelTimeouts.delete(modelName);
+      console.log(`Model ${modelName} re-enabled after rate limit.`);
+    }, durationMs);
+
+    // Store the new timeout ID
+    this.modelTimeouts.set(modelName, timeoutId);
+    console.log(
+      `Model ${modelName} temporarily disabled for ${
+        durationMs / 1000
+      }s due to rate limit.`
+    );
   }
 
-  // Public for ChatProxy access
-  public async executeRequest<T>(
-    requestFn: (client: OpenAI) => Promise<T>,
-    maxAttempts?: number
-  ): Promise<T> {
-    const maxRetries =
-      maxAttempts ?? this.clients.length + this.fallbackClients.length;
-    let currentAttempt = 0;
-    let lastError: Error | null = null;
-    const attemptedClientIdsInCycle = new Set<string>();
-    let usingFallback = false;
-
-    while (currentAttempt < maxRetries) {
-      currentAttempt++;
-
-      // --- Client Selection Logic ---
-      let selectedManagedClient: ManagedClient | null = null;
-      let selectionAttempts = 0;
-      const maxSelectionAttempts =
-        (this.clients.length + this.fallbackClients.length) * 2;
-
-      while (
-        !selectedManagedClient &&
-        selectionAttempts < maxSelectionAttempts
-      ) {
-        selectionAttempts++;
-        const activePrimary = this.getActiveClients(this.clients);
-        if (
-          !usingFallback &&
-          activePrimary.length === 0 &&
-          this.fallbackClients.length > 0
-        ) {
-          console.log(
-            "All primary models are unavailable. Switching to fallback models."
-          );
-          usingFallback = true;
-          attemptedClientIdsInCycle.clear();
+  // Mimics the OpenAI client structure
+  public readonly chat: {
+    completions: {
+      create: (
+        params: ChatCompletionCreateParams,
+        options?: {
+          timeout?: number;
+          maxRetries?: number;
+          signal?: AbortSignal;
+          idempotencyKey?: string;
+          stream?: boolean;
+          headers?: Record<string, string>;
+          defaultHeaders?: Record<string, string>;
+          defaultQuery?: Record<string, string>;
+          responseFormat?: "json" | "text";
+          baseURL?: string;
         }
-
-        selectedManagedClient = this.selectClient(usingFallback);
-
-        if (!selectedManagedClient) {
-          console.warn(
-            "All available models are currently rate-limited or inactive. Waiting before potential retry..."
-          );
-          await this.waitForNextAvailableClient(usingFallback);
-          continue;
+      ) => Promise<
+        Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>
+      >;
+    };
+  } = {
+    completions: {
+      create: async (
+        params,
+        options?: {
+          timeout?: number;
+          maxRetries?: number;
+          signal?: AbortSignal;
+          idempotencyKey?: string;
+          stream?: boolean;
+          headers?: Record<string, string>;
+          defaultHeaders?: Record<string, string>;
+          defaultQuery?: Record<string, string>;
+          responseFormat?: "json" | "text";
+          baseURL?: string;
         }
+      ): Promise<
+        Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>
+      > => {
+        let lastError: Error | null = null;
 
-        // Check if this specific client was already tried in this attempt cycle
-        // Use ONLY the fake API key part for ID in tests
-        const clientId =
-          selectedManagedClient.config.model.apiKey?.substring(0, 8) ||
-          "unknown"; // Simpler ID for testing
-        if (attemptedClientIdsInCycle.has(clientId)) {
-          // We've tried this one recently, try selecting again (might get another)
-          selectedManagedClient = null; // Force re-selection
-          if (selectionAttempts >= maxSelectionAttempts - 1) {
-            console.warn(
-              "Potential selection loop detected after trying all clients. Waiting..."
-            );
-            await this.waitForNextAvailableClient(usingFallback);
+        while (true) {
+          let selected: WeightedModel;
+          try {
+            // Attempt to select an available model
+            selected = this._selectWeightedModel();
+          } catch (selectionError) {
+            // If model selection fails (e.g., all rate limited or no models configured)
+            if (lastError) {
+              // If we previously caught a 429, throw that error as all retries failed
+              throw lastError;
+            }
+            // Otherwise, re-throw the selection error (no models available/configured)
+            throw selectionError;
           }
-          continue;
-        }
 
-        // Mark this client as attempted in this cycle
-        attemptedClientIdsInCycle.add(clientId);
-      }
+          const finalParams: ChatCompletionCreateParams = {
+            ...params,
+            model: selected.modelName, // Use the specific model name associated with the client
+          };
 
-      // If we exhausted selection attempts without finding a usable client
-      if (!selectedManagedClient) {
-        lastError = new Error(
-          "Failed to select an available model after multiple attempts and waits."
-        );
-        console.error(lastError.message);
-        // Continue to next iteration of main loop, maybe retries left
-        continue;
-      }
+          try {
+            // Attempt the API call
+            const result = await selected.model.chat.completions.create(
+              finalParams,
+              options
+            );
+            selected.successCount++; // Increment success count
+            return result;
+          } catch (error) {
+            // Check if abort signal is triggered
+            if (options?.signal?.aborted) {
+              throw new Error("Request aborted");
+            }
 
-      // --- Request Execution Logic ---
-      const modelType = selectedManagedClient.isFallback
-        ? "fallback"
-        : "primary";
-      console.log(
-        `Attempt ${currentAttempt}/${maxRetries}: Using a ${modelType} model with weight ${selectedManagedClient.config.weight}`
-      );
-
-      try {
-        // Increment call counter before making the request
-        selectedManagedClient.stats.callCount++;
-
-        const result = await requestFn(selectedManagedClient.config.model);
-        // Explicitly return on success
-        return result;
-      } catch (error) {
-        lastError = error as Error; // Always capture the latest error
-        if (error instanceof APIError && error.status === 429) {
-          console.warn(`A ${modelType} model hit rate limit (APIError 429).`);
-          const retryAfterHeader = error.headers?.["retry-after"];
-          let retryAfterSeconds = 60; // Default wait
-          if (retryAfterHeader) {
-            const parsedSeconds = parseInt(retryAfterHeader, 10);
-            if (!isNaN(parsedSeconds)) {
-              retryAfterSeconds = parsedSeconds;
+            // Check if it's an OpenAI API error and specifically a rate limit error (429)
+            if (
+              error instanceof OpenAI.APIError &&
+              (error.status === 429 || error.status === 529)
+            ) {
+              console.warn(
+                `Model ${selected.modelName} hit rate limit. Trying next model.`
+              );
+              selected.rateLimitCount++; // Increment rate limit count
+              this._disableModelTemporarily(selected.modelName, 60 * 1000); // Disable for 1 minute
+              lastError = error; // Store the 429 error
+              continue; // Continue the loop to try another model
             } else {
-              try {
-                const retryDate = new Date(retryAfterHeader);
-                const diffSeconds = Math.ceil(
-                  (retryDate.getTime() - Date.now()) / 1000
-                );
-                if (diffSeconds > 0) {
-                  retryAfterSeconds = diffSeconds;
-                }
-              } catch (dateParseError) {
-                console.warn(
-                  "Could not parse Retry-After header:",
-                  retryAfterHeader
-                );
-              }
+              selected.failFastCount++; // Increment fail-fast count
+              // For any other error, re-throw immediately
+              console.error(
+                `Error in Multiplexer: ${selected.modelName}`,
+                error
+              );
+              throw error;
             }
           }
-          this.handleRateLimit(selectedManagedClient, retryAfterSeconds);
-
-          // Clear attempted set if cycle exhausted
-          const currentClientList = usingFallback
-            ? this.fallbackClients
-            : this.clients;
-          if (
-            attemptedClientIdsInCycle.size >=
-            this.getActiveClients(currentClientList).length
-          ) {
-            console.log("Tried all available clients in this cycle.");
-            attemptedClientIdsInCycle.clear();
-          }
-          // Continue to the next attempt iteration
-          continue;
-        } else {
-          console.error(`Request failed with non-recoverable error:`, error);
-          // Track other exception
-          selectedManagedClient.stats.failedWithAnotherException++;
-          // Non-recoverable error - throw immediately to stop the process
-          throw error;
         }
-      }
-    } // End of while loop
-
-    // If the loop completes without returning (success) or throwing (non-429 error),
-    // it means we exhausted retries due to rate limits. Throw the last captured error.
-    throw new Error(
-      `Failed to complete the request after trying ${maxRetries} attempts across available models. Last error: ${
-        lastError?.message || "Unknown error after exhausting retries"
-      }`
-    );
-  }
-
-  // Public for ChatProxy access - Needs similar logic refinement for attempts
-  public async executeRequestForStream(
-    requestFn: (client: OpenAI) => Promise<Stream<ChatCompletionChunk>>,
-    maxAttempts?: number
-  ): Promise<Stream<ChatCompletionChunk>> {
-    const maxRetries =
-      maxAttempts ?? this.clients.length + this.fallbackClients.length;
-    let currentAttempt = 0;
-    let lastError: Error | null = null;
-    const attemptedClientIdsInCycle = new Set<string>();
-    let usingFallback = false;
-
-    while (currentAttempt < maxRetries) {
-      currentAttempt++;
-
-      // --- Client Selection Logic (similar to executeRequest) ---
-      let selectedManagedClient: ManagedClient | null = null;
-      let selectionAttempts = 0;
-      const maxSelectionAttempts =
-        (this.clients.length + this.fallbackClients.length) * 2;
-
-      while (
-        !selectedManagedClient &&
-        selectionAttempts < maxSelectionAttempts
-      ) {
-        selectionAttempts++;
-        const activePrimary = this.getActiveClients(this.clients);
-        if (
-          !usingFallback &&
-          activePrimary.length === 0 &&
-          this.fallbackClients.length > 0
-        ) {
-          console.log(
-            "All primary models unavailable for streaming. Switching to fallback models."
-          );
-          usingFallback = true;
-          attemptedClientIdsInCycle.clear();
-        }
-
-        selectedManagedClient = this.selectClient(usingFallback);
-
-        if (!selectedManagedClient) {
-          console.warn(
-            "All available models rate-limited/inactive (stream). Waiting..."
-          );
-          await this.waitForNextAvailableClient(usingFallback);
-          continue;
-        }
-
-        // Check if this specific client was already tried in this attempt cycle
-        // Use ONLY the fake API key part for ID in tests
-        const clientId =
-          selectedManagedClient.config.model.apiKey?.substring(0, 8) ||
-          "unknown";
-        if (attemptedClientIdsInCycle.has(clientId)) {
-          selectedManagedClient = null;
-          if (selectionAttempts >= maxSelectionAttempts - 1) {
-            console.warn(
-              "Potential selection loop detected (stream). Waiting..."
-            );
-            await this.waitForNextAvailableClient(usingFallback);
-          }
-          continue;
-        }
-        attemptedClientIdsInCycle.add(clientId);
-      }
-
-      // If we exhausted selection attempts without finding a usable client
-      if (!selectedManagedClient) {
-        lastError = new Error(
-          "Failed to select an available model for streaming after multiple attempts."
-        );
-        console.error(lastError.message);
-        // Continue to next iteration of main loop
-        continue;
-      }
-
-      const modelType = selectedManagedClient.isFallback
-        ? "fallback"
-        : "primary";
-      console.log(
-        `Attempt ${currentAttempt}/${maxRetries} (stream): Using a ${modelType} model with weight ${selectedManagedClient.config.weight}`
-      );
-
-      try {
-        // Increment call counter before making the request
-        selectedManagedClient.stats.callCount++;
-
-        const stream = await requestFn(selectedManagedClient.config.model);
-        // Explicitly return on success
-        return stream;
-      } catch (error) {
-        lastError = error as Error; // Capture latest error
-        if (error instanceof APIError && error.status === 429) {
-          console.warn(
-            `A ${modelType} model hit rate limit (APIError 429, stream).`
-          );
-          // Same retry-after logic as non-streaming
-          const retryAfterHeader = error.headers?.["retry-after"];
-          let retryAfterSeconds = 60;
-          if (retryAfterHeader) {
-            const parsedSeconds = parseInt(retryAfterHeader, 10);
-            if (!isNaN(parsedSeconds)) {
-              retryAfterSeconds = parsedSeconds;
-            } else {
-              try {
-                const retryDate = new Date(retryAfterHeader);
-                const diffSeconds = Math.ceil(
-                  (retryDate.getTime() - Date.now()) / 1000
-                );
-                if (diffSeconds > 0) {
-                  retryAfterSeconds = diffSeconds;
-                }
-              } catch (dateParseError) {
-                console.warn(
-                  "Could not parse Retry-After header:",
-                  retryAfterHeader
-                );
-              }
-            }
-          }
-          this.handleRateLimit(selectedManagedClient, retryAfterSeconds);
-
-          // Clear attempted set if cycle exhausted
-          const currentClientList = usingFallback
-            ? this.fallbackClients
-            : this.clients;
-          if (
-            attemptedClientIdsInCycle.size >=
-            this.getActiveClients(currentClientList).length
-          ) {
-            console.log("Tried all available clients in this cycle (stream).");
-            attemptedClientIdsInCycle.clear();
-          }
-          // Continue to the next attempt iteration
-          continue;
-        } else {
-          console.error(`Stream request failed initiation:`, error);
-          // Track other exception
-          selectedManagedClient.stats.failedWithAnotherException++;
-          // Non-recoverable error - throw immediately
-          throw error;
-        }
-      }
-    } // End of while loop
-
-    // If loop completes, throw final error
-    throw new Error(
-      `Failed to initiate the stream request after trying ${maxRetries} attempts. Last error: ${
-        lastError?.message || "Unknown stream error after exhausting retries"
-      }`
-    );
-  }
-
-  // Helper function to wait until the next client becomes available
-  private async waitForNextAvailableClient(
-    useFallback: boolean = false
-  ): Promise<void> {
-    const now = Date.now();
-    const clientList = useFallback ? this.fallbackClients : this.clients;
-    const waitTimes = clientList
-      .filter((c) => c.isRateLimited && c.rateLimitedUntil)
-      .map((c) => c.rateLimitedUntil! - now)
-      .filter((t) => t > 0);
-
-    if (waitTimes.length === 0) {
-      // If no clients are temporarily rate-limited, but still none are selectable
-      // (e.g., all have weight 0), wait a default period before checking again.
-      console.warn(
-        "No clients currently rate-limited, but none are active. Waiting default time."
-      );
-      await new Promise((resolve) => setTimeout(resolve, 5000)); // Default 5s wait
-    } else {
-      const minWait = Math.min(...waitTimes);
-      const waitSeconds = Math.ceil(minWait / 1000);
-      console.log(
-        `Waiting for ${waitSeconds} seconds for the next client to become available...`
-      );
-      await new Promise((resolve) => setTimeout(resolve, minWait + 100)); // Wait + buffer
-    }
-    // After waiting, trigger client reactivation check
-    this.getActiveClients(clientList);
-  }
-
-  // Expose a way to update models dynamically if needed
-  public updateModels(config: ModelMultiplexerConfig) {
-    const { models, fallbackModels = [] } = config;
-
-    if (!models || models.length === 0) {
-      throw new Error("Cannot update models with an empty list.");
-    }
-
-    // Re-initialize clients
-    this.clients = models.map((modelConfig) => ({
-      config: modelConfig,
-      isRateLimited: modelConfig.isRateLimited || false,
-      rateLimitedUntil: modelConfig.rateLimitedUntil,
-      isFallback: false,
-      // Add stats tracking with default values
-      stats: {
-        client: this.getClientIdentifier(modelConfig.model),
-        model: this.getModelIdentifier(modelConfig.model),
-        callCount: 0,
-        failedWithRateLimit: 0,
-        failedWithAnotherException: 0,
       },
-    }));
+    },
+  };
 
-    // Update fallback clients if provided
-    this.fallbackClients = fallbackModels.map((modelConfig) => ({
-      config: modelConfig,
-      isRateLimited: modelConfig.isRateLimited || false,
-      rateLimitedUntil: modelConfig.rateLimitedUntil,
-      isFallback: true,
-      // Add stats tracking with default values
-      stats: {
-        client: this.getClientIdentifier(modelConfig.model),
-        model: this.getModelIdentifier(modelConfig.model),
-        callCount: 0,
-        failedWithRateLimit: 0,
-        failedWithAnotherException: 0,
-      },
-    }));
-
-    // Recalculate total weight based on the new set of clients
-    this.totalWeight = this.getActiveClients(this.clients).reduce(
-      (sum, mc) => sum + mc.config.weight,
-      0
-    );
-    this.totalFallbackWeight = this.getActiveClients(
-      this.fallbackClients
-    ).reduce((sum, mc) => sum + mc.config.weight, 0);
-
-    console.log("Model configurations updated and clients re-initialized.");
-    if (this.totalWeight <= 0 && this.clients.length > 0) {
-      console.warn(
-        "All updated primary models have zero or negative weight, or are inactive."
-      );
+  addModel(model: OpenAI, weight: number, modelName: string): void {
+    if (!Number.isInteger(weight) || weight <= 0) {
+      throw new Error("Weight must be a positive integer.");
     }
-    if (this.fallbackClients.length > 0 && this.totalFallbackWeight <= 0) {
-      console.warn(
-        "All updated fallback models have zero or negative weight, or are inactive."
-      );
+    if (!modelName || typeof modelName !== "string") {
+      throw new Error("modelName must be a non-empty string.");
     }
+    if (
+      this.weightedModels.some((wm) => wm.modelName === modelName) ||
+      this.fallbackModels.some((wm) => wm.modelName === modelName)
+    ) {
+      console.warn(
+        `Attempted to add a model with the same name '${modelName}' multiple times. Skipping.`
+      );
+      return;
+    }
+    // Add model with disabledUntil initialized to null and stats to 0
+    this.weightedModels.push({
+      model,
+      weight,
+      modelName,
+      disabledUntil: null,
+      successCount: 0,
+      rateLimitCount: 0,
+      failFastCount: 0,
+    });
+  }
+
+  addFallbackModel(model: OpenAI, weight: number, modelName: string): void {
+    if (!Number.isInteger(weight) || weight <= 0) {
+      throw new Error("Weight must be a positive integer.");
+    }
+    if (!modelName || typeof modelName !== "string") {
+      throw new Error("modelName must be a non-empty string.");
+    }
+    if (
+      this.weightedModels.some((wm) => wm.modelName === modelName) ||
+      this.fallbackModels.some((wm) => wm.modelName === modelName)
+    ) {
+      console.warn(
+        `Attempted to add a model with the same name '${modelName}' multiple times. Skipping.`
+      );
+      return;
+    }
+    // Add fallback model with disabledUntil initialized to null and stats to 0
+    this.fallbackModels.push({
+      model,
+      weight,
+      modelName,
+      disabledUntil: null,
+      successCount: 0,
+      rateLimitCount: 0,
+      failFastCount: 0,
+    });
+  }
+
+  reset(): void {
+    // Clear all pending timeouts
+    this.modelTimeouts.forEach((timeoutId) => clearTimeout(timeoutId));
+    this.modelTimeouts.clear();
+    // Reset model lists
+    this.weightedModels = [];
+    this.fallbackModels = [];
+  }
+
+  getStats(): Record<
+    string,
+    { success: number; rateLimited: number; failed: number }
+  > {
+    const stats: Record<
+      string,
+      { success: number; rateLimited: number; failed: number }
+    > = {};
+    for (const wm of [...this.weightedModels, ...this.fallbackModels]) {
+      stats[wm.modelName] = {
+        success: wm.successCount,
+        rateLimited: wm.rateLimitCount,
+        failed: wm.failFastCount,
+      };
+    }
+    return stats;
   }
 }
