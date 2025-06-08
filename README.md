@@ -27,6 +27,14 @@ A lightweight, zero-dependency TypeScript library that combines the quotas of mu
 - 🎯 **Zero Dependencies**: Lightweight with no runtime dependencies
 - 📊 **Usage Analytics**: Track which providers are hitting limits
 
+## How Quota Combining Works
+
+```
+Single Model:        [GPT-4: 10K RPM] ❌ 429 Error at 10,001 requests
+Multiple Providers:  [OpenAI: 10K] + [Claude: 15K] + [Gemini: 20K] = 45,000 RPM ✅
+Multiple Models:     [GPT-4: 10K] + [GPT-4-mini: 50K] + [Claude: 15K] = 75,000 RPM ✅✅
+```
+
 ## Installation
 
 ```bash
@@ -168,15 +176,8 @@ for await (const chunk of stream) {
 }
 ```
 
-## How Quota Combining Works
 
-```
-Single Model:        [GPT-4: 10,000 RPM] ❌ 429 Error at 10,001 requests
-Multiple Providers:  [OpenAI: 10K] + [Claude: 15K] + [Gemini: 20K] = 45,000 RPM ✅
-Multiple Models:     [GPT-4: 10K] + [GPT-4-mini: 50K] + [Claude: 15K] = 75,000 RPM ✅✅
-```
-
-## Examples
+## More Examples
 
 Check out the [examples](./examples) directory for more detailed usage patterns.
 
