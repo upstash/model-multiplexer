@@ -6,10 +6,10 @@ A lightweight, zero-dependency TypeScript library that combines the quotas of mu
 
 ## The Problem: Rate Limits Kill Your App
 
-- ❌ **Error 429**: "Rate limit exceeded" stops your application
-- ❌ **Quota exhaustion**: Single provider limits constrain your throughput
-- ❌ **Unpredictable failures**: Rate limits hit at the worst possible moments
-- ❌ **Manual failover**: Switching providers requires code changes
+❌ **Error 429**: "Rate limit exceeded" stops your application
+❌ **Quota exhaustion**: Single provider limits constrain your throughput
+❌ **Unpredictable failures**: Rate limits hit at the worst possible moments
+❌ **Manual failover**: Switching providers requires code changes
 
 ## The Solution: Combined Quotas
 
