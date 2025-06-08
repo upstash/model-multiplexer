@@ -1,8 +1,8 @@
-# @upstash/model-multiplexer
+# Model Multiplexer
 
 **Eliminate 429 Rate Limit Errors Forever** 🚀
 
-A lightweight, zero-dependency TypeScript library that combines the quotas of multiple LLM providers into a single unified API. Never hit rate limits again by automatically distributing your requests across OpenAI, Claude, Gemini, and other providers.
+A lightweight, zero-dependency TypeScript library that combines the quotas of multiple LLM providers (and models) with a single unified API. Never hit rate limits again by automatically distributing your requests across OpenAI, Claude, Gemini, and other providers.
 
 ## The Problem: Rate Limits Kill Your App
 
@@ -23,7 +23,7 @@ A lightweight, zero-dependency TypeScript library that combines the quotas of mu
 - 🚀 **Quota Multiplication**: Combine rate limits from multiple providers for massive throughput
 - 🛡️ **429 Error Elimination**: Automatic failover prevents rate limit failures
 - ⚡ **Zero Downtime**: Seamless switching between providers when limits hit
-- 🔌 **OpenAI Compatible**: Works with existing OpenAI SDK code
+- 🔌 **OpenAI SDK Compatible**: Works with existing OpenAI SDK code
 - 🎯 **Zero Dependencies**: Lightweight with no runtime dependencies
 - 📊 **Usage Analytics**: Track which providers are hitting limits
 
@@ -33,7 +33,7 @@ A lightweight, zero-dependency TypeScript library that combines the quotas of mu
 npm install @upstash/model-multiplexer openai
 ```
 
-> **Note**: You need to install `openai` as it's a peer dependency
+> **Note**: No need to install `openai` if it is already installed in your project.
 
 ## Quick Start
 
@@ -52,16 +52,24 @@ const openai = new OpenAI({
   baseURL: "https://api.openai.com/v1",
 });
 
+const gemini = new OpenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  baseURL: "https://generativelanguage.googleapis.com/v1beta/",
+});
+
 // Initialize multiplexer
 const multiplexer = new Multiplexer();
 
 // Add models with weights and specific model names
 multiplexer.addModel(claude, 5, "claude-sonnet-4-0");
-multiplexer.addModel(openai, 3, "gpt-4.1-mini");
+multiplexer.addModel(openai, 3, "gpt-4.1");
+
+multiplexer.addFallbackModel(openai, 3, "gpt-4.1-mini");
+multiplexer.addFallbackModel(gemini, 3, "gemini-2.0-flash");
 
 // Use like a regular OpenAI client
 const completion = await multiplexer.chat.completions.create({
-  model: "claude-sonnet-4-0", // Will be overridden by selected model
+  model: "placeholder", // Will be overridden by selected model
   messages: [
     { role: "system", content: "You are a helpful assistant." },
     { role: "user", content: "What is the capital of France?" },
@@ -69,46 +77,33 @@ const completion = await multiplexer.chat.completions.create({
 });
 
 console.log(completion.choices[0].message.content);
+console.log("Model usage stats:", multiplexer.getStats());
 ```
 
-## Multi-Provider Setup
+### How Primary and Fallback Models Work
 
-```typescript
-import { Multiplexer } from "@upstash/model-multiplexer";
-import OpenAI from "openai";
+The multiplexer operates with a **two-tier system**:
 
-// Set up clients for different providers
-const claude = new OpenAI({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-  baseURL: "https://api.anthropic.com/v1/",
-});
+#### **Primary Models** (`addModel`)
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-  baseURL: "https://api.openai.com/v1",
-});
+- **First choice**: Always used when available
+- **Weight-based selection**: Higher weights = higher probability of selection
+- **Example**: In the code above, `claude-sonnet-4-0` (weight: 5) and `gpt-4.1` (weight: 3) are primary models
 
-const gemini = new OpenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  baseURL: "https://generativelanguage.googleapis.com/v1beta/",
-});
+#### **Fallback Models** (`addFallbackModel`)
 
-const multiplexer = new Multiplexer();
+- **Backup safety net**: Only used when ALL primary models hit rate limits
+- **Example**: `gpt-4.1-mini` and `gemini-2.0-flash` (both weight: 3) only activate if both primary models are rate-limited
 
-// Add primary models (higher quality, potentially stricter rate limits)
-multiplexer.addModel(claude, 5, "claude-sonnet-4-0");
-multiplexer.addModel(claude, 3, "claude-opus-4-0"); // Same provider, separate quota!
-multiplexer.addModel(gemini, 4, "gemini-2.5-pro-preview-05-06");
+#### **Request Flow**
 
-// Add fallback models (cheaper, higher availability)
-multiplexer.addFallbackModel(openai, 5, "gpt-4.1-mini");
-multiplexer.addFallbackModel(openai, 3, "gpt-4.1"); // Same provider, separate quota!
-multiplexer.addFallbackModel(gemini, 3, "gemini-2.0-flash");
+1. **Normal operation**: Multiplexer selects from primary models (claude-sonnet-4-0 or gpt-4.1) based on weights (5:3 ratio)
+2. **Rate limit hit**: If a primary model returns 429, it's temporarily disabled (e.g., Claude hits limit)
+3. **Automatic failover**: Traffic continues flowing to remaining active primary models (e.g., all traffic goes to GPT-4.1)
+4. **Emergency fallback**: If ALL primary models hit limits, fallback models activate (GPT-4.1-mini + Gemini-2.0-flash with equal weights)
+5. **Recovery**: Rate-limited models automatically re-enable after cooldown period
 
-// Result: Combined quotas from multiple models + multiple providers = massive throughput
-```
-
-## API Reference
+## API Examples
 
 ### Creating a Multiplexer
 
@@ -136,7 +131,21 @@ multiplexer.addFallbackModel(client: OpenAI, weight: number, modelName: string)
 
 ```typescript
 const stats = multiplexer.getStats();
+console.log("Model usage stats:", stats);
 // Returns: Record<string, { success: number; rateLimited: number; failed: number }>
+```
+
+**Example Response:**
+
+```typescript
+Model usage stats: {
+  'claude-sonnet-4-0': { success: 847, rateLimited: 3, failed: 1 },
+  'gpt-4.1': { success: 521, rateLimited: 1, failed: 0 },
+  'claude-opus-4-0': { success: 312, rateLimited: 0, failed: 0 },
+  'gemini-2.5-pro-preview-05-06': { success: 289, rateLimited: 0, failed: 0 },
+  'gpt-4.1-mini': { success: 3, rateLimited: 0, failed: 0 },
+  'gemini-2.0-flash': { success: 1, rateLimited: 0, failed: 0 }
+}
 ```
 
 ### Resetting the Multiplexer
@@ -167,51 +176,9 @@ Multiple Providers:  [OpenAI: 10K] + [Claude: 15K] + [Gemini: 20K] = 45,000 RPM 
 Multiple Models:     [GPT-4: 10K] + [GPT-4-mini: 50K] + [Claude: 15K] = 75,000 RPM ✅✅
 ```
 
-### The Magic Behind Zero 429 Errors
-
-1. **Quota Multiplication**: Your effective rate limit becomes the SUM of all models (even from same provider)
-2. **Isolated Model Limits**: Each model has separate rate limits (GPT-4 + GPT-4-mini = 2x OpenAI quota)
-3. **Smart Distribution**: Requests are distributed across all models based on weights
-4. **Instant Failover**: When Model A hits 429, traffic instantly routes to Model B
-5. **Cross-Provider Redundancy**: Combine models from multiple providers for maximum resilience
-6. **Transparent Operation**: Your code sees one unified API, not multiple models/providers
-
-### Real-World Impact
-
-**Single Model Approach:**
-
-- 1,000 requests/minute → ❌ 429 error when GPT-4 limit hit
-
-**Multi-Model Same Provider:**
-
-- 1,000 requests/minute → ✅ distributed as 400 (GPT-4) + 600 (GPT-4-mini) → success
-
-**Multi-Provider Setup:**
-
-- 1,000 requests/minute → ✅ distributed as 300 (GPT-4) + 300 (GPT-4-mini) + 200 (Claude) + 200 (Gemini) → maximum resilience
-
-## Environment Variables
-
-Set up your API keys:
-
-```bash
-export OPENAI_API_KEY="your-openai-key"
-export ANTHROPIC_API_KEY="your-anthropic-key"
-export GEMINI_API_KEY="your-gemini-key"
-```
-
 ## Examples
 
 Check out the [examples](./examples) directory for more detailed usage patterns.
-
-## TypeScript Support
-
-Full TypeScript support with proper type definitions included.
-
-```typescript
-import { Multiplexer } from "@upstash/model-multiplexer";
-// All OpenAI types are available through the peer dependency
-```
 
 ## Contributing
 
