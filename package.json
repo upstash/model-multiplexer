@@ -1,6 +1,6 @@
 {
   "name": "@upstash/model-multiplexer",
-  "version": "0.3",
+  "version": "0.4.0",
   "description": "A multiplexer for Large Language Model APIs built on the OpenAI SDK. It combines quotas from multiple models and automatically uses fallback models when the primary models are rate limited.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,7 +22,7 @@
   "author": "Upstash",
   "license": "MIT",
   "peerDependencies": {
-    "openai": "^4.104.0"
+    "openai": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.11.5",

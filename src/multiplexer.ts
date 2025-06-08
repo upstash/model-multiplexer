@@ -1,8 +1,19 @@
-import OpenAI from "openai";
 import type { ChatCompletionCreateParams } from "openai/resources/chat/completions";
 
+// Flexible interface for OpenAI-compatible clients
+interface OpenAICompatibleClient {
+  chat: {
+    completions: {
+      create: (
+        params: ChatCompletionCreateParams,
+        options?: any
+      ) => Promise<any>;
+    };
+  };
+}
+
 interface WeightedModel {
-  model: OpenAI;
+  model: OpenAICompatibleClient;
   weight: number;
   modelName: string;
   // Timestamp until which the model is disabled due to rate limiting
@@ -144,7 +155,9 @@ export class Multiplexer {
           baseURL?: string;
         }
       ) => Promise<
-        Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>
+        Awaited<
+          ReturnType<OpenAICompatibleClient["chat"]["completions"]["create"]>
+        >
       >;
     };
   } = {
@@ -164,7 +177,9 @@ export class Multiplexer {
           baseURL?: string;
         }
       ): Promise<
-        Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>
+        Awaited<
+          ReturnType<OpenAICompatibleClient["chat"]["completions"]["create"]>
+        >
       > => {
         let lastError: Error | null = null;
 
@@ -196,15 +211,17 @@ export class Multiplexer {
             );
             selected.successCount++; // Increment success count
             return result;
-          } catch (error) {
+          } catch (error: any) {
             // Check if abort signal is triggered
             if (options?.signal?.aborted) {
               throw new Error("Request aborted");
             }
 
-            // Check if it's an OpenAI API error and specifically a rate limit error (429)
+            // Check if it's a rate limit error (429 or 529)
             if (
-              error instanceof OpenAI.APIError &&
+              error &&
+              typeof error === "object" &&
+              "status" in error &&
               (error.status === 429 || error.status === 529)
             ) {
               console.warn(
@@ -212,7 +229,8 @@ export class Multiplexer {
               );
               selected.rateLimitCount++; // Increment rate limit count
               this._disableModelTemporarily(selected.modelName, 60 * 1000); // Disable for 1 minute
-              lastError = error; // Store the 429 error
+              lastError =
+                error instanceof Error ? error : new Error(String(error)); // Store the 429 error
               continue; // Continue the loop to try another model
             } else {
               selected.failFastCount++; // Increment fail-fast count
@@ -229,7 +247,11 @@ export class Multiplexer {
     },
   };
 
-  addModel(model: OpenAI, weight: number, modelName: string): void {
+  addModel(
+    model: OpenAICompatibleClient,
+    weight: number,
+    modelName: string
+  ): void {
     if (!Number.isInteger(weight) || weight <= 0) {
       throw new Error("Weight must be a positive integer.");
     }
@@ -257,7 +279,11 @@ export class Multiplexer {
     });
   }
 
-  addFallbackModel(model: OpenAI, weight: number, modelName: string): void {
+  addFallbackModel(
+    model: OpenAICompatibleClient,
+    weight: number,
+    modelName: string
+  ): void {
     if (!Number.isInteger(weight) || weight <= 0) {
       throw new Error("Weight must be a positive integer.");
     }
