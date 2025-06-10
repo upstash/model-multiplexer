@@ -31,6 +31,7 @@ A lightweight, zero-dependency TypeScript library that combines the quotas of mu
 
 ```
 Single Model:        [GPT-4: 10K RPM] ❌ 429 Error at 10,001 requests
+Single Model (two keys):        [GPT-4: 10K RPM] + [GPT-4: 10K RPM] = 20,000 RPM ✅
 Multiple Providers:  [OpenAI: 10K] + [Claude: 15K] + [Gemini: 20K] = 45,000 RPM ✅
 Multiple Models:     [GPT-4: 10K] + [GPT-4-mini: 50K] + [Claude: 15K] = 75,000 RPM ✅✅
 ```
@@ -60,6 +61,11 @@ const openai = new OpenAI({
   baseURL: "https://api.openai.com/v1",
 });
 
+const openai_2 = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY_2,
+  baseURL: "https://api.openai.com/v1",
+});
+
 const gemini = new OpenAI({
   apiKey: process.env.GEMINI_API_KEY,
   baseURL: "https://generativelanguage.googleapis.com/v1beta/",
@@ -71,6 +77,7 @@ const multiplexer = new Multiplexer();
 // Add models with weights and specific model names
 multiplexer.addModel(claude, 5, "claude-sonnet-4-0");
 multiplexer.addModel(openai, 3, "gpt-4.1");
+multiplexer.addModel(openai_2, 3, "gpt-4.1");
 
 multiplexer.addFallbackModel(openai, 3, "gpt-4.1-mini");
 multiplexer.addFallbackModel(gemini, 3, "gemini-2.0-flash");
